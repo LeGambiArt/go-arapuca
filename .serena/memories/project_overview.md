@@ -1,7 +1,7 @@
 # go-arapuca — Project Overview
 
 ## Purpose
-Go bindings for [arapuca](https://github.com/sergio-correia/arapuca), a Linux/macOS process sandbox.
+Go bindings for [arapuca](https://github.com/LeGambiArt/arapuca), a Linux/macOS process sandbox.
 Wraps the C API (which is itself a Rust static library) via cgo to provide idiomatic Go types for launching sandboxed subprocesses.
 
 ## Tech Stack
