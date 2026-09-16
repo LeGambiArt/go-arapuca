@@ -18,7 +18,7 @@ jobs:
 
       - name: Clone and install arapuca
         run: |
-          git clone --depth 1 https://github.com/sergio-correia/arapuca.git /tmp/arapuca
+          git clone --depth 1 https://github.com/LeGambiArt/arapuca.git /tmp/arapuca
           cd /tmp/arapuca
           make package
           make install PREFIX=/usr/local
@@ -60,7 +60,7 @@ jobs:
 
       - name: Clone and install arapuca
         run: |
-          git clone --depth 1 https://github.com/sergio-correia/arapuca.git /tmp/arapuca
+          git clone --depth 1 https://github.com/LeGambiArt/arapuca.git /tmp/arapuca
           cd /tmp/arapuca
           make package
           make install PREFIX=$HOME/.local

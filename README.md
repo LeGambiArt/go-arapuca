@@ -1,6 +1,6 @@
 # go-arapuca
 
-Go bindings for [arapuca](https://github.com/sergio-correia/arapuca),
+Go bindings for [arapuca](https://github.com/LeGambiArt/arapuca),
 a Linux/macOS process sandbox. Wraps the C API via cgo to provide
 idiomatic Go types for launching sandboxed subprocesses.
 
@@ -24,7 +24,7 @@ rlimits, memory polling, parent-PID watchdog.
 ## Install
 
 ```bash
-go get github.com/sergio-correia/go-arapuca
+go get github.com/LeGambiArt/go-arapuca
 ```
 
 ## Versioning
@@ -35,8 +35,13 @@ go-arapuca release documents the minimum arapuca version it requires:
 
 | go-arapuca | arapuca (min) |
 |------------|---------------|
-| v0.2.0+    | v0.1.1        |
+| v0.2.5+    | v0.2.8        |
+| v0.2.0-v0.2.4 | v0.1.1     |
 | v0.1.x     | v0.1.0        |
+
+The repository moved from `github.com/sergio-correia/go-arapuca` to
+`github.com/LeGambiArt/go-arapuca` in v0.2.5. Update import paths when
+upgrading to this release.
 
 If you see link errors or crashes, rebuild and reinstall the C
 library first.
@@ -53,7 +58,7 @@ import (
     "fmt"
     "log"
 
-    arapuca "github.com/sergio-correia/go-arapuca"
+    arapuca "github.com/LeGambiArt/go-arapuca"
 )
 
 func main() {
@@ -104,7 +109,7 @@ import (
     "fmt"
     "log"
 
-    arapuca "github.com/sergio-correia/go-arapuca"
+    arapuca "github.com/LeGambiArt/go-arapuca"
 )
 
 func main() {

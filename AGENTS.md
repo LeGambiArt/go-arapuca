@@ -2,7 +2,7 @@
 
 ## Overview
 
-Go bindings for [arapuca](https://github.com/sergio-correia/arapuca), a Linux/macOS process sandbox. This is a **cgo wrapper library** — all runtime functionality lives in a Rust static library (`libarapuca.a`) linked via pkg-config. There are zero Go dependencies beyond the standard library.
+Go bindings for [arapuca](https://github.com/LeGambiArt/arapuca), a Linux/macOS process sandbox. This is a **cgo wrapper library** — all runtime functionality lives in a Rust static library (`libarapuca.a`) linked via pkg-config. There are zero Go dependencies beyond the standard library.
 
 ## Commands
 
