@@ -127,6 +127,8 @@ func (s *Sandbox) Launch(ctx context.Context, cfg Config, cmd string, args []str
 	C.arapuca_profile_set_netns(profile, C.bool(cfg.Profile.UseNetNS))
 	C.arapuca_profile_set_pidns(profile, C.bool(cfg.Profile.UsePidNS))
 	C.arapuca_profile_set_dns_capture(profile, C.bool(cfg.Profile.DnsCapture))
+	C.arapuca_profile_set_deny_unix_sockets(profile, C.bool(cfg.Profile.DenyUnixSockets))
+	C.arapuca_profile_set_network_listeners(profile, C.bool(cfg.Profile.AllowNetworkListeners))
 	if cfg.Profile.SeccompProfile != SeccompProfileDefault {
 		// Go-side allowlist: reject unknown profile names before reaching the
 		// C library. This prevents a more-permissive future profile from being
@@ -391,20 +393,22 @@ const (
 
 // Profile defines the restrictions applied to a sandboxed subprocess.
 type Profile struct {
-	ReadPaths        []string           // Allowed read-only paths.
-	WritePaths       []string           // Allowed read-write paths.
-	MaxMemoryMB      uint64             // Memory limit in MB (0 = no limit).
-	MaxCPUPct        uint32             // CPU percentage (0 = no limit; 200 = 2 cores).
-	MaxPIDs          uint32             // Max processes (0 = no limit).
-	MaxFileSizeMB    uint64             // Max file size in MB (0 = no limit).
-	MaxOpenFiles     uint64             // Max open file descriptors (0 = no limit, RLIMIT_NOFILE).
-	AllowExec        bool               // Allow execve on binaries in read AND write paths. Required for shebang scripts (e.g. Python handlers). Caution: with WritePaths, this creates a write-then-exec surface.
-	CgroupBestEffort bool               // When true, launch without cgroup limits if controllers aren't delegated (applies rlimit fallbacks). When false (default), missing controllers cause a hard failure.
-	UseNetNS         bool               // Use network namespace isolation.
-	UsePidNS         bool               // Use PID namespace isolation (process appears as PID 1).
-	DnsCapture       bool               // Capture DNS queries as audit events (requires UseNetNS).
-	SeccompProfile   SeccompProfileKind // Seccomp profile: SeccompProfileDefault (strict), SeccompProfileStrict, or SeccompProfileBaseline (for Bun/Claude Code).
-	Isolation        *MicroVmIsolation  // Micro-VM isolation (nil = process-level sandbox).
+	ReadPaths             []string           // Allowed read-only paths.
+	WritePaths            []string           // Allowed read-write paths.
+	MaxMemoryMB           uint64             // Memory limit in MB (0 = no limit).
+	MaxCPUPct             uint32             // CPU percentage (0 = no limit; 200 = 2 cores).
+	MaxPIDs               uint32             // Max processes (0 = no limit).
+	MaxFileSizeMB         uint64             // Max file size in MB (0 = no limit).
+	MaxOpenFiles          uint64             // Max open file descriptors (0 = no limit, RLIMIT_NOFILE).
+	AllowExec             bool               // Allow execve on binaries in read AND write paths. Required for shebang scripts (e.g. Python handlers). Caution: with WritePaths, this creates a write-then-exec surface.
+	CgroupBestEffort      bool               // When true, launch without cgroup limits if controllers aren't delegated (applies rlimit fallbacks). When false (default), missing controllers cause a hard failure.
+	UseNetNS              bool               // Use network namespace isolation.
+	UsePidNS              bool               // Use PID namespace isolation (process appears as PID 1).
+	DnsCapture            bool               // Capture DNS queries as audit events (requires UseNetNS).
+	SeccompProfile        SeccompProfileKind // Seccomp profile: SeccompProfileDefault (strict), SeccompProfileStrict, or SeccompProfileBaseline (for Bun/Claude Code).
+	DenyUnixSockets       bool               // Deny AF_UNIX socket creation and retained Unix sockets (Linux x86_64/aarch64 only). Breaks runtimes using socketpair internally.
+	AllowNetworkListeners bool               // Allow the sandboxed process to bind and accept TCP connections. On Linux, confined to the network namespace.
+	Isolation             *MicroVmIsolation  // Micro-VM isolation (nil = process-level sandbox).
 }
 
 // MicroVmIsolation configures micro-VM isolation via libkrun.

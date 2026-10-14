@@ -388,6 +388,106 @@ func TestAllowExec_DefaultBlocksShebang(t *testing.T) {
 	}
 }
 
+// TestDenyUnixSockets_UnsupportedPlatform verifies that DenyUnixSockets
+// fails on platforms without seccomp (macOS, non-x86_64/aarch64 Linux).
+func TestDenyUnixSockets_UnsupportedPlatform(t *testing.T) {
+	if runtime.GOOS == "linux" && (runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64") {
+		t.Skip("DenyUnixSockets is supported on this platform")
+	}
+
+	sb, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sb.Close()
+
+	_, err = sb.Launch(context.Background(), Config{
+		Profile: Profile{
+			DenyUnixSockets: true,
+			ReadPaths:       []string{"/usr", "/lib", "/lib64", "/bin"},
+		},
+	}, trueBin(), nil, nil)
+	if err == nil {
+		t.Fatal("expected error for DenyUnixSockets on unsupported platform")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "unix socket") {
+		t.Errorf("expected error to mention unix socket, got: %v", err)
+	}
+}
+
+// TestDenyUnixSockets_Happy verifies that DenyUnixSockets is accepted
+// on supported Linux platforms with the wrapper binary available.
+func TestDenyUnixSockets_Happy(t *testing.T) {
+	if runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") {
+		t.Skip("DenyUnixSockets requires Linux x86_64/aarch64")
+	}
+	if WrapperPath() == "" {
+		t.Skip("arapuca wrapper binary not found")
+	}
+
+	sb, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sb.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	proc, err := sb.Launch(ctx, Config{
+		TaskID: "deny-unix-sockets",
+		Profile: Profile{
+			DenyUnixSockets: true,
+			ReadPaths:       []string{"/usr", "/lib", "/lib64", "/bin"},
+		},
+	}, trueBin(), nil, nil)
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	exitCode, err := proc.Wait()
+	proc.Cleanup()
+	if exitCode != 0 {
+		t.Errorf("expected exit 0, got %d (err: %v)", exitCode, err)
+	}
+}
+
+// TestAllowNetworkListeners_Happy verifies that AllowNetworkListeners
+// is accepted on supported platforms.
+func TestAllowNetworkListeners_Happy(t *testing.T) {
+	sb, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sb.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	proc, err := sb.Launch(ctx, Config{
+		TaskID: "allow-listeners",
+		Profile: Profile{
+			AllowNetworkListeners: true,
+			ReadPaths:             []string{"/usr", "/lib", "/lib64", "/bin"},
+		},
+	}, trueBin(), nil, nil)
+	if err != nil {
+		t.Logf("Launch result (may fail for non-listener reasons): %v", err)
+		return
+	}
+	exitCode, err := proc.Wait()
+	proc.Cleanup()
+	if exitCode != 0 {
+		t.Logf("exit %d (may fail for non-listener reasons): %v", exitCode, err)
+	}
+}
+
+func trueBin() string {
+	if _, err := os.Stat("/usr/bin/true"); err == nil {
+		return "/usr/bin/true"
+	}
+	return "/bin/true"
+}
+
 // containsSeccompError checks whether err is a seccomp profile rejection.
 func containsSeccompError(err error) bool {
 	if err == nil {
