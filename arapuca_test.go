@@ -906,3 +906,54 @@ func TestProcessSignal_AfterCleanup(t *testing.T) {
 		t.Error("expected an error signaling a cleaned-up process")
 	}
 }
+
+// TestCpuTimeout verifies that CpuTimeoutSecs kills a CPU-spinning
+// process with SIGXCPU at the limit. The rlimit is applied by the
+// wrapper, so the test needs the arapuca binary and read paths that
+// force the wrapper launch.
+func TestCpuTimeout(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("CpuTimeoutSecs rlimit enforcement is exercised on Linux")
+	}
+	if WrapperPath() == "" {
+		t.Skip("arapuca wrapper binary not found")
+	}
+
+	sb, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sb.Close()
+
+	// One second of CPU time; the backstop is generous so a healthy
+	// run never depends on machine speed.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	proc, err := sb.Launch(ctx, Config{
+		TaskID: "cpu-timeout",
+		Profile: Profile{
+			CpuTimeoutSecs: 1,
+			ReadPaths:      []string{"/usr", "/lib", "/lib64", "/bin"},
+		},
+	}, "/bin/sh", []string{"-c", "while :; do :; done"}, nil)
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+
+	exitCode, waitErr := proc.Wait()
+	proc.Cleanup()
+
+	elapsed := time.Since(start)
+	if exitCode != 0 || waitErr == nil {
+		t.Errorf("expected death by signal, got exit=%d err=%v", exitCode, waitErr)
+	}
+	// The kill signal itself is SIGKILL (the rlimit sets soft = hard, so
+	// the kernel skips the SIGXCPU grace window), which is indistinguishable
+	// from the context backstop by signal number alone. The elapsed time is
+	// the oracle: the limit fires at ~1s of CPU time, the backstop at 60s.
+	if elapsed > 10*time.Second {
+		t.Errorf("process took %v to die; CPU timeout did not fire promptly", elapsed)
+	}
+}
