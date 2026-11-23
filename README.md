@@ -99,6 +99,15 @@ func main() {
 }
 ```
 
+### File descriptor inheritance
+
+Only the descriptors passed via `Launch` — `Stdin`/`Stdout`/`Stderr`
+and `extraFiles` — reach the sandboxed process. arapuca closes every
+other inherited descriptor at each exec boundary, so a descriptor
+the parent holds without `CLOEXEC` no longer leaks into the sandbox.
+If a consumer relied on accidental inheritance, pass the file
+explicitly through `extraFiles` instead.
+
 ### Micro-VM isolation (Linux only, requires `-tags microvm`)
 
 ```go
