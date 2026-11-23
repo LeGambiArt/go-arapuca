@@ -249,6 +249,49 @@ type ResourceUsage struct {
 }
 ```
 
+## Audit events
+
+`Config.AuditCallback func(AuditEvent)` receives every audit event
+the library emits during a sandbox lifecycle: sandbox setup, layer
+application, process start and exit, cleanup. It requires building
+with `-tags audit` and a `libarapuca.a` installed with the serde
+feature (`make setup-audit` in the arapuca checkout, then
+`go build -tags audit`). Without the tag, a non-nil callback fails
+the launch instead of silently dropping the stream.
+
+```go
+proc, err := sb.Launch(ctx, arapuca.Config{
+    AuditCallback: func(e arapuca.AuditEvent) {
+        log.Printf("audit: %s", e.EventType)
+    },
+    // ...
+}, cmd, nil, nil)
+```
+
+`AuditEvent` is a thin envelope: `EventType` (the upstream variant
+name, e.g. `"SandboxReady"`), `Timestamp` (monotonic nanoseconds
+since sandbox creation — anchor it with `wall_clock_epoch_ns` inside
+the `SandboxInit` payload, it is not wall-clock time), and `Payload`,
+the complete event JSON preserved verbatim. An empty `EventType` is
+the library's serialization-failure sentinel.
+
+Handler contract — the C callback is synchronous, and so is this
+one:
+
+- The handler runs on the goroutine calling `Launch`, `Wait`, or
+  `Cleanup`, while that `Sandbox` or `Process` mutex is held. It
+  must not touch the same `Sandbox` or `Process` — that deadlocks
+  on all three call sites.
+- It must not block. A slow handler stalls the audit pipe up to
+  the supervisor; with file-access auditing enabled it stalls the
+  supervised process's syscalls.
+- During `Launch` it runs on a lock-pinned OS thread.
+- It must be safe for concurrent invocation from multiple threads.
+- It must not call back into this package (no reentrancy).
+
+Consumers needing decoupling can forward events into their own
+channel inside the handler.
+
 ## C API intentionally not bound
 
 A few functions in arapuca's C header are deliberately not exposed:

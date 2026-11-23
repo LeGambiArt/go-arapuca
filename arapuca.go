@@ -259,6 +259,18 @@ func (s *Sandbox) Launch(ctx context.Context, cfg Config, cmd string, args []str
 		}
 	}()
 
+	// Wire the audit callback before the launch call: events fire
+	// during arapuca_launch itself, and the registration must
+	// outlive a failed call (released after it returns below).
+	var audit auditRegistration
+	if cfg.AuditCallback != nil {
+		var err error
+		audit, err = setAuditCallback(lcfg, cfg.AuditCallback)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	runtime.LockOSThread()
 	proc := C.arapuca_launch(
 		s.sb, lcfg, cCmd,
@@ -268,15 +280,20 @@ func (s *Sandbox) Launch(ctx context.Context, cfg Config, cmd string, args []str
 	if proc == nil {
 		err := fmt.Errorf("arapuca: %s", lastError())
 		runtime.UnlockOSThread()
+		// Events may have fired before the failed launch returned;
+		// release only now, never between the config setup and the
+		// call.
+		releaseAuditRegistration(audit)
 		return nil, err
 	}
 	runtime.UnlockOSThread()
 
 	pid := int(C.arapuca_process_pid(proc))
 	p := &Process{
-		proc: proc,
-		pid:  pid,
-		done: make(chan struct{}),
+		proc:  proc,
+		pid:   pid,
+		done:  make(chan struct{}),
+		audit: audit,
 	}
 
 	// Context cancellation goroutine.
@@ -296,10 +313,11 @@ func (s *Sandbox) Launch(ctx context.Context, cfg Config, cmd string, args []str
 
 // Process represents a running sandboxed subprocess.
 type Process struct {
-	proc *C.struct_arapuca_ArapucaProcess
-	pid  int
-	done chan struct{}
-	mu   sync.Mutex
+	proc  *C.struct_arapuca_ArapucaProcess
+	pid   int
+	done  chan struct{}
+	mu    sync.Mutex
+	audit auditRegistration
 }
 
 // PID returns the process ID of the sandboxed subprocess.
@@ -376,6 +394,8 @@ func (p *Process) OOMCount() int {
 
 // Cleanup releases the subprocess's resources (temp directory, cgroup).
 // Must only be called after Wait() returns. Safe to call multiple times.
+// With an audit callback set, the handler runs during this call (the
+// SandboxCleanup event is emitted from inside arapuca_process_cleanup).
 func (p *Process) Cleanup() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -383,6 +403,10 @@ func (p *Process) Cleanup() {
 		C.arapuca_process_cleanup(p.proc)
 		p.proc = nil
 	}
+	// The registration must outlive the C call above; releasing it
+	// before would drop events the call itself is still emitting.
+	releaseAuditRegistration(p.audit)
+	p.audit = auditRegistration{}
 }
 
 // Signal delivers a signal to the sandboxed subprocess. On Linux the
@@ -490,6 +514,7 @@ type Config struct {
 	NetworkProxySocket string            // Path to network proxy Unix socket.
 	AllowedHosts       []AllowedHost     // Outbound allowlist for CONNECT proxy.
 	Env                map[string]string // Caller-supplied env vars for subprocess.
+	AuditCallback      func(AuditEvent)  // Synchronous audit-event handler (requires -tags audit and a serde-built libarapuca.a). The handler runs on the goroutine calling Launch, Wait, or Cleanup while that Sandbox/Process mutex is held: it must not touch the same Sandbox or Process, and it must not block — a slow handler stalls the audit pipe up to the supervisor. See README.md ("Audit events") for the full contract.
 }
 
 // ResourceUsage holds cgroup v2 resource usage statistics.

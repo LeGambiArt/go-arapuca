@@ -44,6 +44,32 @@ jobs:
           go mod tidy
           diff go.mod.orig go.mod
 
+  check-linux-audit:
+    runs-on: ubuntu-latest
+    container: registry.fedoraproject.org/fedora:latest
+    steps:
+      - name: Install deps
+        run: dnf install -y gcc make cargo golang cbindgen pkg-config openssl-devel git-core diffutils
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+
+      - name: Clone and install arapuca (serde)
+        run: |
+          git clone --depth 1 https://github.com/LeGambiArt/arapuca.git /tmp/arapuca
+          cd /tmp/arapuca
+          make package INSTALL_FEATURES=serde
+          make install PREFIX=/usr/local
+          echo "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig" >> $GITHUB_ENV
+
+      - name: Build (audit)
+        run: CGO_ENABLED=1 go build -tags audit ./...
+
+      - name: Test (audit)
+        run: CGO_ENABLED=1 go test -v -tags audit ./...
+
+      - name: Vet (audit)
+        run: CGO_ENABLED=1 go vet -tags audit ./...
+
   check-macos:
     runs-on: macos-latest
     steps:
