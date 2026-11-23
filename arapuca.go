@@ -124,6 +124,7 @@ func (s *Sandbox) Launch(ctx context.Context, cfg Config, cmd string, args []str
 		// Guard here to preserve the "0 = no limit" contract.
 		C.arapuca_profile_set_max_open_files(profile, C.uint64_t(cfg.Profile.MaxOpenFiles))
 	}
+	C.arapuca_profile_set_cpu_timeout(profile, C.uint64_t(cfg.Profile.CpuTimeoutSecs))
 	C.arapuca_profile_set_allow_exec(profile, C.bool(cfg.Profile.AllowExec))
 	C.arapuca_profile_set_cgroup_best_effort(profile, C.bool(cfg.Profile.CgroupBestEffort))
 	C.arapuca_profile_set_netns(profile, C.bool(cfg.Profile.UseNetNS))
@@ -427,6 +428,7 @@ type Profile struct {
 	MaxPIDs                   uint32             // Max processes (0 = no limit).
 	MaxFileSizeMB             uint64             // Max file size in MB (0 = no limit).
 	MaxOpenFiles              uint64             // Max open file descriptors (0 = no limit, RLIMIT_NOFILE).
+	CpuTimeoutSecs            uint64             // CPU time limit in seconds (0 = no limit, RLIMIT_CPU). Once the process has consumed that much CPU time it is killed (SIGKILL: the limit sets soft = hard, so there is no SIGXCPU grace window). Enforced by the wrapper, so a value > 0 requires the arapuca binary. The library rejects values above 30 days at launch.
 	AllowExec                 bool               // Allow execve on binaries in read AND write paths. Required for shebang scripts (e.g. Python handlers). Caution: with WritePaths, this creates a write-then-exec surface.
 	CgroupBestEffort          bool               // When true, launch without cgroup limits if controllers aren't delegated (applies rlimit fallbacks). When false (default), missing controllers cause a hard failure.
 	UseNetNS                  bool               // Use network namespace isolation.
