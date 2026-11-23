@@ -1,6 +1,7 @@
 GO_VERSION := 1.25
 
-.PHONY: build test lint vet check clean setup setup-microvm build-microvm test-microvm
+.PHONY: build test lint vet check clean setup setup-microvm build-microvm test-microvm \
+	build-audit test-audit setup-audit
 
 ARAPUCA_DIR ?= ../arapuca
 PREFIX      ?= $(HOME)/.local
@@ -16,6 +17,12 @@ test:
 
 test-microvm:
 	CGO_ENABLED=1 go test -v -tags microvm ./...
+
+build-audit:
+	CGO_ENABLED=1 go build -tags audit ./...
+
+test-audit:
+	CGO_ENABLED=1 go test -v -tags audit ./...
 
 lint:
 	golangci-lint run ./...
@@ -38,3 +45,9 @@ setup-microvm:
 	cd $(ARAPUCA_DIR) && make install INSTALL_FEATURES=microvm PREFIX=$(PREFIX)
 	@echo "Done. Run: export PKG_CONFIG_PATH=$(PREFIX)/lib/pkgconfig"
 	@echo "Build with: go build -tags microvm ./..."
+
+# Build and install arapuca with the serde feature (audit event JSON).
+setup-audit:
+	cd $(ARAPUCA_DIR) && make install INSTALL_FEATURES=serde PREFIX=$(PREFIX)
+	@echo "Done. Run: export PKG_CONFIG_PATH=$(PREFIX)/lib/pkgconfig"
+	@echo "Build with: go build -tags audit ./..."
