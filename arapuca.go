@@ -129,10 +129,15 @@ func (s *Sandbox) Launch(ctx context.Context, cfg Config, cmd string, args []str
 	C.arapuca_profile_set_cgroup_best_effort(profile, C.bool(cfg.Profile.CgroupBestEffort))
 	C.arapuca_profile_set_netns(profile, C.bool(cfg.Profile.UseNetNS))
 	C.arapuca_profile_set_pidns(profile, C.bool(cfg.Profile.UsePidNS))
+	C.arapuca_profile_set_userns(profile, C.bool(cfg.Profile.UseUserNS))
 	C.arapuca_profile_set_dns_capture(profile, C.bool(cfg.Profile.DnsCapture))
 	C.arapuca_profile_set_deny_unix_sockets(profile, C.bool(cfg.Profile.DenyUnixSockets))
+	C.arapuca_profile_set_deny_user_session_sockets(profile, C.bool(cfg.Profile.DenyUserSessionSockets))
 	C.arapuca_profile_set_unix_socket_connect_policy(profile, C.bool(cfg.Profile.DenyPrivilegedUnixSockets))
 	if err := addUnixSocketDenyRoots(profile, cfg.Profile.UnixSocketDenyRoots, cfg.Profile.DenyPrivilegedUnixSockets); err != nil {
+		return nil, err
+	}
+	if err := addMachLookupServices(profile, cfg.Profile.MachLookupServices); err != nil {
 		return nil, err
 	}
 	C.arapuca_profile_set_network_listeners(profile, C.bool(cfg.Profile.AllowNetworkListeners))
@@ -193,6 +198,7 @@ func (s *Sandbox) Launch(ctx context.Context, cfg Config, cmd string, args []str
 	if cfg.Stderr != nil {
 		C.arapuca_config_set_stderr_fd(lcfg, C.int32_t(cfg.Stderr.Fd()))
 	}
+	C.arapuca_config_set_tty(lcfg, C.bool(cfg.TTY))
 	if cfg.NetworkProxySocket != "" {
 		setConfigStr(lcfg, cfg.NetworkProxySocket, func(c *C.struct_arapuca_ArapucaConfig, cs *C.char) {
 			C.arapuca_config_set_network_proxy(c, cs)
@@ -432,12 +438,15 @@ type Profile struct {
 	AllowExec                 bool               // Allow execve on binaries in read AND write paths. Required for shebang scripts (e.g. Python handlers). Caution: with WritePaths, this creates a write-then-exec surface.
 	CgroupBestEffort          bool               // When true, launch without cgroup limits if controllers aren't delegated (applies rlimit fallbacks). When false (default), missing controllers cause a hard failure.
 	UseNetNS                  bool               // Use network namespace isolation.
+	UseUserNS                 bool               // Run in an empty user namespace: isolation hardening, not enforcement (target is capless, host network shared). Linux only; exclusive with UseNetNS, AllowedHosts, AllowNetworkListeners, NetworkProxySocket, and UsePidNS (Launch fails validation on a combination).
 	UsePidNS                  bool               // Use PID namespace isolation (process appears as PID 1).
 	DnsCapture                bool               // Capture DNS queries as audit events (requires UseNetNS).
 	SeccompProfile            SeccompProfileKind // Seccomp profile: SeccompProfileDefault (strict), SeccompProfileStrict, or SeccompProfileBaseline (for Bun/Claude Code).
 	DenyUnixSockets           bool               // Deny AF_UNIX socket creation and retained Unix sockets (Linux x86_64/aarch64 only). Breaks runtimes using socketpair internally.
+	DenyUserSessionSockets    bool               // Deny connects to the same-user session sockets (session bus, systemd --user). Requires DenyPrivilegedUnixSockets; Launch fails validation without it. Linux x86_64/aarch64 only.
 	DenyPrivilegedUnixSockets bool               // Broker connect() through the unotify supervisor and deny privileged daemon sockets (docker, podman, dbus, libvirt, snap LXD, Incus, ...). Linux x86_64/aarch64 process isolation only; requires the arapuca wrapper binary. Different from DenyUnixSockets (which denies socket creation outright); the two can be combined.
 	UnixSocketDenyRoots       []string           // Extra connect() deny roots merged with the built-in list. Requires DenyPrivilegedUnixSockets; each root must be absolute and contain no ':' or ','.
+	MachLookupServices        []string           // Exact Mach service names granted XPC lookup (macOS only; ignored on other platforms). Each name: 1-255 chars, ASCII letters/digits plus '. _ - ( )' and spaces, no leading hyphen, no surrounding whitespace.
 	AllowNetworkListeners     bool               // Allow the sandboxed process to bind and accept TCP connections. On Linux, confined to the network namespace.
 	Isolation                 *MicroVmIsolation  // Micro-VM isolation (nil = process-level sandbox).
 }
@@ -477,6 +486,7 @@ type Config struct {
 	Stdin              *os.File          // Redirect stdin (nil = inherit).
 	Stdout             *os.File          // Redirect stdout (nil = inherit).
 	Stderr             *os.File          // Redirect stderr (nil = inherit).
+	TTY                bool              // Allocate a PTY and attach the slave as the child's controlling terminal. Incompatible with Stdin/Stdout/Stderr redirection (Launch fails validation on a combination).
 	NetworkProxySocket string            // Path to network proxy Unix socket.
 	AllowedHosts       []AllowedHost     // Outbound allowlist for CONNECT proxy.
 	Env                map[string]string // Caller-supplied env vars for subprocess.
@@ -599,4 +609,52 @@ func addUnixSocketDenyRoots(profile *C.struct_arapuca_ArapucaProfile, roots []st
 		C.free(unsafe.Pointer(cs))
 	}
 	return nil
+}
+
+// addMachLookupServices validates the macOS XPC service grants in Go
+// and forwards them to the profile. The library validates the same
+// rules at launch on macOS; validating here returns the error from
+// Launch itself on every platform, so a malformed grant list is
+// caught even where the list would be silently ignored.
+func addMachLookupServices(profile *C.struct_arapuca_ArapucaProfile, services []string) error {
+	for _, service := range services {
+		if service == "" {
+			return fmt.Errorf("arapuca: mach service name must not be empty")
+		}
+		if len(service) > 255 {
+			return fmt.Errorf("arapuca: mach service name %q exceeds 255 characters", service)
+		}
+		if service != strings.TrimSpace(service) {
+			return fmt.Errorf("arapuca: mach service name %q must not have surrounding whitespace", service)
+		}
+		if strings.HasPrefix(service, "-") {
+			return fmt.Errorf("arapuca: mach service name %q must not start with a hyphen", service)
+		}
+		for _, ch := range service {
+			if !isMachServiceChar(ch) {
+				return fmt.Errorf("arapuca: mach service name %q contains invalid character %q", service, ch)
+			}
+		}
+		cs := C.CString(service)
+		C.arapuca_profile_add_mach_lookup_service(profile, cs)
+		C.free(unsafe.Pointer(cs))
+	}
+	return nil
+}
+
+// isMachServiceChar reports whether ch is allowed in a Mach service
+// name: ASCII letters, digits, dots, underscores, hyphens, spaces,
+// and parentheses.
+func isMachServiceChar(ch rune) bool {
+	switch {
+	case ch >= 'a' && ch <= 'z',
+		ch >= 'A' && ch <= 'Z',
+		ch >= '0' && ch <= '9':
+		return true
+	}
+	switch ch {
+	case '.', '_', '-', ' ', '(', ')':
+		return true
+	}
+	return false
 }
