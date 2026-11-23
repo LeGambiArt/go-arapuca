@@ -2,9 +2,14 @@ package arapuca
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"net"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -508,4 +513,280 @@ func containsStr(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// udsPolicyEnvSupported reports whether the connect-policy tests can
+// run here: they need the wrapper binary, python3 as an in-sandbox
+// client, an unprivileged user+network namespace (the supervisor
+// inspects the target, which on Yama ptrace_scope=1 hosts requires
+// the capabilities a user namespace provides), and a Yama scope
+// below 3 (which denies all ptrace outright).
+func udsPolicyEnvSupported() bool {
+	if WrapperPath() == "" {
+		return false
+	}
+	for _, probe := range []struct {
+		cmd  string
+		args []string
+	}{
+		{"python3", []string{"-c", "pass"}},
+		{"unshare", []string{"--user", "--net", "--map-root-user", "--", "/bin/true"}},
+	} {
+		if err := exec.Command(probe.cmd, probe.args...).Run(); err != nil {
+			return false
+		}
+	}
+	if b, err := os.ReadFile("/proc/sys/kernel/yama/ptrace_scope"); err == nil {
+		if scope, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && scope >= 3 {
+			return false
+		}
+	}
+	return true
+}
+
+// udsEchoListener is a Unix socket listener in the test process that
+// accepts a single connection, echoes an ack, and reports what it
+// received. Denied-connect tests must not hang on Accept, so the
+// listener is closed by Cleanup.
+type udsEchoListener struct {
+	path     string
+	received chan []byte
+}
+
+func startUDSEchoListener(t *testing.T, dir, name string) *udsEchoListener {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("listen %s: %v", path, err)
+	}
+	l := &udsEchoListener{path: path, received: make(chan []byte, 1)}
+	go func() {
+		defer ln.Close()
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		buf := make([]byte, 4096)
+		n, _ := conn.Read(buf)
+		_, _ = conn.Write([]byte("ack"))
+		l.received <- buf[:n]
+	}()
+	t.Cleanup(func() { ln.Close() })
+	return l
+}
+
+// launchUDSClient runs a python3 snippet in the sandbox with the
+// connect policy active and returns its combined stdout.
+func launchUDSClient(t *testing.T, cfg Config, script string) (string, string, int) {
+	t.Helper()
+	sb, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sb.Close()
+
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	stderrR, stderrW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cfg.Stdout = stdoutW
+	cfg.Stderr = stderrW
+	cfg.Profile.UseNetNS = true
+	cfg.Profile.SeccompProfile = SeccompProfileBaseline
+	cfg.Profile.DenyPrivilegedUnixSockets = true
+	cfg.Profile.ReadPaths = []string{"/usr", "/lib", "/lib64", "/bin"}
+
+	proc, err := sb.Launch(ctx, cfg, "/usr/bin/python3", []string{"-c", script}, nil)
+	stdoutW.Close()
+	stderrW.Close()
+	if err != nil {
+		stdoutR.Close()
+		stderrR.Close()
+		t.Fatalf("Launch: %v", err)
+	}
+	exitCode, err := proc.Wait()
+	proc.Cleanup()
+	stdout, _ := io.ReadAll(stdoutR)
+	stderr, _ := io.ReadAll(stderrR)
+	stdoutR.Close()
+	stderrR.Close()
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	return string(stdout), string(stderr), exitCode
+}
+
+// TestDenyPrivilegedUnixSockets_AllowsOrdinarySocket verifies that
+// with the connect policy active, connect() to a socket outside any
+// deny root is brokered through and data flows end to end.
+func TestDenyPrivilegedUnixSockets_AllowsOrdinarySocket(t *testing.T) {
+	if runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") {
+		t.Skip("connect policy requires Linux x86_64/aarch64")
+	}
+	if !udsPolicyEnvSupported() {
+		t.Skip("requires wrapper, python3, and an unprivileged user namespace")
+	}
+
+	dir := t.TempDir()
+	listener := startUDSEchoListener(t, dir, "allowed.sock")
+	script := fmt.Sprintf(`
+import socket
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(%q)
+s.sendall(b"hello-broker")
+assert s.recv(64) == b"ack"
+print("ALLOW_OK")
+`, listener.path)
+
+	stdout, stderr, exitCode := launchUDSClient(t, Config{TaskID: "uds-policy-allow"}, script)
+	if exitCode != 0 || !strings.Contains(stdout, "ALLOW_OK") {
+		t.Errorf("allowed connect should work end to end: exit=%d stdout=%q stderr=%q", exitCode, stdout, stderr)
+	}
+	select {
+	case data := <-listener.received:
+		if string(data) != "hello-broker" {
+			t.Errorf("listener received %q, want %q", data, "hello-broker")
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("listener never received the payload")
+	}
+}
+
+// TestDenyPrivilegedUnixSockets_DeniesDenyRoot verifies that connect()
+// to a socket under a configured deny root fails with EACCES and the
+// listener never sees a connection.
+func TestDenyPrivilegedUnixSockets_DeniesDenyRoot(t *testing.T) {
+	if runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") {
+		t.Skip("connect policy requires Linux x86_64/aarch64")
+	}
+	if !udsPolicyEnvSupported() {
+		t.Skip("requires wrapper, python3, and an unprivileged user namespace")
+	}
+
+	dir := t.TempDir()
+	listener := startUDSEchoListener(t, dir, "privileged.sock")
+	script := fmt.Sprintf(`
+import socket, errno
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+rc = s.connect_ex(%q)
+print("RC", rc)
+assert rc == errno.EACCES, rc
+print("DENY_OK")
+`, listener.path)
+
+	stdout, stderr, exitCode := launchUDSClient(t, Config{
+		TaskID: "uds-policy-deny",
+		Profile: Profile{
+			UnixSocketDenyRoots: []string{dir},
+		},
+	}, script)
+	if exitCode != 0 || !strings.Contains(stdout, "DENY_OK") {
+		t.Errorf("denied connect should report EACCES: exit=%d stdout=%q stderr=%q", exitCode, stdout, stderr)
+	}
+	// The broker dials the peer with its own private socket to check
+	// it, so the listener may accept a connection that sends no data;
+	// the oracle is that no payload ever flows (the target's socket is
+	// never connected on the deny path).
+	select {
+	case data := <-listener.received:
+		if len(data) != 0 {
+			t.Errorf("listener must not receive data on a denied connect, got %q", data)
+		}
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// TestDenyPrivilegedUnixSockets_CombinedWithDenyUnixSockets verifies
+// that both Unix socket policies can be active at once. The
+// combination used to fail every launch before arapuca's supervisor
+// branch fixed it.
+func TestDenyPrivilegedUnixSockets_CombinedWithDenyUnixSockets(t *testing.T) {
+	if runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") {
+		t.Skip("Unix socket policies require Linux x86_64/aarch64")
+	}
+	if WrapperPath() == "" {
+		t.Skip("arapuca wrapper binary not found")
+	}
+
+	sb, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sb.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	proc, err := sb.Launch(ctx, Config{
+		TaskID: "uds-policies-combined",
+		Profile: Profile{
+			DenyUnixSockets:           true,
+			DenyPrivilegedUnixSockets: true,
+			ReadPaths:                 []string{"/usr", "/lib", "/lib64", "/bin"},
+		},
+	}, trueBin(), nil, nil)
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	exitCode, err := proc.Wait()
+	proc.Cleanup()
+	if exitCode != 0 {
+		t.Errorf("expected exit 0, got %d (err: %v)", exitCode, err)
+	}
+}
+
+// TestUnixSocketDenyRoots_Validation verifies that invalid deny-root
+// configurations fail fast at Launch with a Go error instead of
+// being recorded and failing later inside the C library.
+func TestUnixSocketDenyRoots_Validation(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("connect policy is Linux-only")
+	}
+
+	cases := []struct {
+		name      string
+		policy    bool
+		roots     []string
+		wantError string
+	}{
+		{"relative path", true, []string{"relative/sock"}, "absolute"},
+		{"colon separator", true, []string{"/tmp/a:b"}, "must not contain"},
+		{"comma separator", true, []string{"/tmp/a,b"}, "must not contain"},
+		{"roots without policy", false, []string{"/tmp/sock"}, "requires DenyPrivilegedUnixSockets"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sb, err := New()
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			defer sb.Close()
+
+			_, err = sb.Launch(context.Background(), Config{
+				Profile: Profile{
+					DenyPrivilegedUnixSockets: tc.policy,
+					UnixSocketDenyRoots:       tc.roots,
+					ReadPaths:                 []string{"/usr", "/lib", "/lib64", "/bin"},
+				},
+			}, trueBin(), nil, nil)
+			if err == nil {
+				t.Fatal("expected Launch to reject the deny roots")
+			}
+			if !strings.Contains(err.Error(), tc.wantError) {
+				t.Errorf("error %q does not mention %q", err, tc.wantError)
+			}
+		})
+	}
 }
