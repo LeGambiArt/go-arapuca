@@ -249,6 +249,21 @@ type ResourceUsage struct {
 }
 ```
 
+## C API intentionally not bound
+
+A few functions in arapuca's C header are deliberately not exposed:
+
+- `arapuca_apply` — applies a profile to the calling process. Its
+  preconditions (single-threaded execution, exclusive file-descriptor
+  ownership, no live io_uring mappings) cannot hold inside a Go
+  process, where the runtime spawns threads and holds descriptors
+  before `main` runs. Use `Launch` with a fresh process instead.
+- `arapuca_handle_selfexec_if_wrapper` — the self-exec trampoline for
+  C consumers. Go self-exec mode uses the package's `preinit`
+  gate instead (`EnableSelfExecMode`).
+- `arapuca_profile_set_lpac` — Windows-only (Less Privileged App
+  Container); go-arapuca targets Linux and macOS.
+
 ## Thread Safety
 
 - `Sandbox` is safe for concurrent use (mutex-protected).
