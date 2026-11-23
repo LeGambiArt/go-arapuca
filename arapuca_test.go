@@ -957,3 +957,216 @@ func TestCpuTimeout(t *testing.T) {
 		t.Errorf("process took %v to die; CPU timeout did not fire promptly", elapsed)
 	}
 }
+
+// usernsAvailable probes unprivileged user namespace support, which
+// UseUserNS launches require.
+func usernsAvailable() bool {
+	return exec.Command("unshare", "--user", "--map-root-user", "--", "/bin/true").Run() == nil
+}
+
+// TestUseUserNS_Happy verifies a launch with an empty user namespace
+// runs on supported Linux hosts.
+func TestUseUserNS_Happy(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("UseUserNS is Linux-only")
+	}
+	if WrapperPath() == "" {
+		t.Skip("arapuca wrapper binary not found")
+	}
+	if !usernsAvailable() {
+		t.Skip("unprivileged user namespaces unavailable")
+	}
+
+	sb, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sb.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	proc, err := sb.Launch(ctx, Config{
+		TaskID: "userns-happy",
+		Profile: Profile{
+			UseUserNS: true,
+			ReadPaths: []string{"/usr", "/lib", "/lib64", "/bin"},
+		},
+	}, trueBin(), nil, nil)
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	exitCode, err := proc.Wait()
+	proc.Cleanup()
+	if exitCode != 0 {
+		t.Errorf("expected exit 0, got %d (err: %v)", exitCode, err)
+	}
+}
+
+// TestUseUserNS_ExclusiveWithNetNS verifies the combination fails
+// validation instead of one flag silently winning. The library
+// validates before the wrapper check, so no wrapper is needed.
+func TestUseUserNS_ExclusiveWithNetNS(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("UseUserNS is Linux-only")
+	}
+
+	sb, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sb.Close()
+
+	_, err = sb.Launch(context.Background(), Config{
+		Profile: Profile{
+			UseUserNS: true,
+			UseNetNS:  true,
+		},
+	}, trueBin(), nil, nil)
+	if err == nil {
+		t.Fatal("expected error for UseUserNS combined with UseNetNS")
+	}
+	if !strings.Contains(err.Error(), "exclusive") {
+		t.Errorf("expected an exclusivity error, got: %v", err)
+	}
+}
+
+// TestDenyUserSessionSockets_RequiresPolicy verifies the session
+// socket denial fails validation without the connect policy rather
+// than being silently skipped.
+func TestDenyUserSessionSockets_RequiresPolicy(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("session socket denial is Linux-only")
+	}
+
+	sb, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sb.Close()
+
+	_, err = sb.Launch(context.Background(), Config{
+		Profile: Profile{
+			DenyUserSessionSockets: true,
+		},
+	}, trueBin(), nil, nil)
+	if err == nil {
+		t.Fatal("expected error for session socket denial without the connect policy")
+	}
+	if !strings.Contains(err.Error(), "requires") {
+		t.Errorf("expected a requires-policy error, got: %v", err)
+	}
+}
+
+// TestDenyUserSessionSockets_Happy verifies the session socket denial
+// is accepted with the connect policy active.
+func TestDenyUserSessionSockets_Happy(t *testing.T) {
+	if runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") {
+		t.Skip("session socket denial requires Linux x86_64/aarch64")
+	}
+	if !udsPolicyEnvSupported() {
+		t.Skip("requires wrapper, python3, and an unprivileged user namespace")
+	}
+
+	sb, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sb.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	proc, err := sb.Launch(ctx, Config{
+		TaskID: "deny-session-sockets",
+		Profile: Profile{
+			DenyUserSessionSockets:    true,
+			DenyPrivilegedUnixSockets: true,
+			UseNetNS:                  true,
+			SeccompProfile:            SeccompProfileBaseline,
+			ReadPaths:                 []string{"/usr", "/lib", "/lib64", "/bin"},
+		},
+	}, trueBin(), nil, nil)
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	exitCode, err := proc.Wait()
+	proc.Cleanup()
+	if exitCode != 0 {
+		t.Errorf("expected exit 0, got %d (err: %v)", exitCode, err)
+	}
+}
+
+// TestMachLookupServices_Validation verifies malformed service names
+// fail fast at Launch with a Go error. The rules mirror the library's
+// macOS validation so a broken grant list is caught on every platform,
+// not only where it would be enforced.
+func TestMachLookupServices_Validation(t *testing.T) {
+	cases := []struct {
+		name    string
+		service string
+	}{
+		{"empty", ""},
+		{"leading hyphen", "-com.apple.securityd"},
+		{"invalid character", "com.apple.securityd;rm -rf"},
+		{"oversized", strings.Repeat("a", 256)},
+		{"leading whitespace", " com.apple.securityd"},
+		{"trailing whitespace", "com.apple.securityd "},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sb, err := New()
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			defer sb.Close()
+
+			_, err = sb.Launch(context.Background(), Config{
+				Profile: Profile{
+					MachLookupServices: []string{tc.service},
+					ReadPaths:          []string{"/usr", "/lib", "/lib64", "/bin"},
+				},
+			}, trueBin(), nil, nil)
+			if err == nil {
+				t.Fatal("expected Launch to reject the mach service name")
+			}
+		})
+	}
+}
+
+// TestTTY verifies a PTY-backed launch wires the slave as the
+// child's stdio. The oracle is the child's own view: [ -t 0 ] and
+// [ -t 1 ] only succeed on a terminal, so a dropped TTY binding
+// (child inheriting the test binary's stdio — a pipe or /dev/null
+// under `go test`) fails the test instead of silently passing.
+func TestTTY(t *testing.T) {
+	if WrapperPath() == "" {
+		t.Skip("arapuca wrapper binary not found")
+	}
+
+	sb, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sb.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	proc, err := sb.Launch(ctx, Config{
+		TaskID: "tty-pty-stdio",
+		TTY:    true,
+		Profile: Profile{
+			ReadPaths: []string{"/usr", "/lib", "/lib64", "/bin"},
+		},
+	}, "/bin/sh", []string{"-c", "[ -t 0 ] && [ -t 1 ]"}, nil)
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	exitCode, err := proc.Wait()
+	proc.Cleanup()
+	if exitCode != 0 {
+		t.Errorf("expected the child to see a terminal on stdin and stdout, got exit %d (err: %v)", exitCode, err)
+	}
+}
