@@ -378,6 +378,27 @@ func (p *Process) Cleanup() {
 	}
 }
 
+// Signal delivers a signal to the sandboxed subprocess. On Linux the
+// signal is sent through the process's pidfd, so it cannot race with
+// PID reuse. Signaling after Wait or Cleanup returns an error: the
+// process has already been reaped.
+func (p *Process) Signal(sig syscall.Signal) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.proc == nil {
+		return errors.New("arapuca: process already cleaned up")
+	}
+
+	runtime.LockOSThread()
+	rc := C.arapuca_process_signal(p.proc, C.int32_t(sig))
+	var err error
+	if rc != 0 {
+		err = fmt.Errorf("arapuca: signal %d: %s", sig, lastError())
+	}
+	runtime.UnlockOSThread()
+	return err
+}
+
 // ─── Types ──────────────────────────────────────────────────────────
 
 // SeccompProfileKind is the seccomp enforcement level for the sandbox.

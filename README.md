@@ -181,6 +181,7 @@ sb.Close()                                 // release handle
 ```go
 proc.PID() int                     // subprocess PID
 proc.Wait() (int, error)           // wait for exit (code, error)
+proc.Signal(sig syscall.Signal) error // send a signal (pidfd-based on Linux; errors after Wait/Cleanup)
 proc.ResourceStats() ResourceUsage // cgroup stats (before Cleanup)
 proc.OOMCount() int                // OOM kill count (before Cleanup)
 proc.Cleanup()                     // release resources

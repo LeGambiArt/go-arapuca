@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -788,5 +789,120 @@ func TestUnixSocketDenyRoots_Validation(t *testing.T) {
 				t.Errorf("error %q does not mention %q", err, tc.wantError)
 			}
 		})
+	}
+}
+
+func sleepBin() string {
+	if _, err := os.Stat("/usr/bin/sleep"); err == nil {
+		return "/usr/bin/sleep"
+	}
+	return "/bin/sleep"
+}
+
+// TestProcessSignal verifies that a sandboxed process can be signaled
+// before Wait, and that the signal — not the context's SIGKILL — is
+// what killed it.
+func TestProcessSignal(t *testing.T) {
+	if WrapperPath() == "" {
+		t.Skip("arapuca wrapper binary not found")
+	}
+
+	sb, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sb.Close()
+
+	// The context timeout is the backstop: if the signal is lost, the
+	// cancellation goroutine kills the process group with SIGKILL (9)
+	// after 30s and the signal-number assertion below fails.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	proc, err := sb.Launch(ctx, Config{
+		TaskID:  "signal-term",
+		Profile: Profile{ReadPaths: []string{"/usr", "/lib", "/lib64", "/bin"}},
+	}, sleepBin(), []string{"30"}, nil)
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("Signal: %v", err)
+	}
+
+	exitCode, waitErr := proc.Wait()
+	proc.Cleanup()
+	if exitCode != 0 || waitErr == nil {
+		t.Errorf("expected death by signal, got exit=%d err=%v", exitCode, waitErr)
+	}
+	if !strings.Contains(waitErr.Error(), strconv.Itoa(int(syscall.SIGTERM))) {
+		t.Errorf("expected death by SIGTERM (%d), got: %v", syscall.SIGTERM, waitErr)
+	}
+}
+
+// TestProcessSignal_AfterWait verifies signaling a reaped process
+// fails instead of silently doing nothing.
+func TestProcessSignal_AfterWait(t *testing.T) {
+	if WrapperPath() == "" {
+		t.Skip("arapuca wrapper binary not found")
+	}
+
+	sb, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sb.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	proc, err := sb.Launch(ctx, Config{
+		TaskID:  "signal-after-wait",
+		Profile: Profile{ReadPaths: []string{"/usr", "/lib", "/lib64", "/bin"}},
+	}, trueBin(), nil, nil)
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if _, err := proc.Wait(); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	defer proc.Cleanup()
+
+	if err := proc.Signal(syscall.SIGTERM); err == nil {
+		t.Error("expected an error signaling a reaped process")
+	}
+}
+
+// TestProcessSignal_AfterCleanup verifies signaling a cleaned-up
+// process fails.
+func TestProcessSignal_AfterCleanup(t *testing.T) {
+	if WrapperPath() == "" {
+		t.Skip("arapuca wrapper binary not found")
+	}
+
+	sb, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sb.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	proc, err := sb.Launch(ctx, Config{
+		TaskID:  "signal-after-cleanup",
+		Profile: Profile{ReadPaths: []string{"/usr", "/lib", "/lib64", "/bin"}},
+	}, trueBin(), nil, nil)
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if _, err := proc.Wait(); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	proc.Cleanup()
+
+	if err := proc.Signal(syscall.SIGTERM); err == nil {
+		t.Error("expected an error signaling a cleaned-up process")
 	}
 }
